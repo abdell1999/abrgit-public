@@ -1,0 +1,92 @@
+name: Release
+
+# Se lanza a mano desde el repo privado:
+#   gh workflow run release.yml -R abdell1999/abrgit-public -f tag=v0.1.0
+# Corre aquí (repo público) para usar minutos gratuitos de Actions.
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag de abrgit a publicar (p. ej. v0.1.0)"
+        required: true
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ inputs.tag }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Build (${{ matrix.platform }})
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: [windows-latest, ubuntu-22.04]
+    runs-on: ${{ matrix.platform }}
+
+    steps:
+      - name: Checkout source (private repo)
+        uses: actions/checkout@v4
+        with:
+          repository: abdell1999/abrgit
+          ref: ${{ inputs.tag }}
+          token: ${{ secrets.SOURCE_REPO_TOKEN }}
+          persist-credentials: false
+
+      - name: Check tag matches app version
+        shell: bash
+        run: |
+          version=$(node -p "require('./apps/desktop/src-tauri/tauri.conf.json').version")
+          if [ "v$version" != "${{ inputs.tag }}" ]; then
+            echo "::error::El tag ${{ inputs.tag }} no coincide con la versión de tauri.conf.json (v$version)"
+            exit 1
+          fi
+
+      - name: Install Tauri system dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev libayatana-appindicator3-dev patchelf
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: apps/desktop/src-tauri
+
+      - run: pnpm install --frozen-lockfile
+
+      # lint ejecuta `nuxt prepare`, que genera los tipos que necesita typecheck.
+      - run: pnpm lint
+      - run: pnpm typecheck
+      - run: pnpm --filter desktop test:unit
+
+      - name: Rust tests
+        working-directory: apps/desktop/src-tauri
+        shell: bash
+        run: |
+          mkdir -p ../.output/public
+          git config --global user.name "ABRGit CI"
+          git config --global user.email "ci@example.invalid"
+          cargo test --locked
+
+      - uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          projectPath: apps/desktop
+          tagName: ${{ inputs.tag }}
+          releaseName: "ABRGit ${{ inputs.tag }}"
+          releaseBody: "Descargas oficiales de ABRGit para Windows y Linux."
+          releaseDraft: false
+          prerelease: false
+          releaseCommitish: main
